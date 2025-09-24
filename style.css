@@ -5,5 +5,5 @@
 body {
   background-image: url('images/yozora.png'); /* 画像パス */
   background-repeat: repeat; /* 繰り返す */
-  background-size: auto;      /* 元サイズで繰り返す */
+  background-size: cover;   
 }
