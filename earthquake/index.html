@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>地震情報ダッシュボード</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+body { font-family: sans-serif; margin:0; padding:0; }
+header { background:#0a3d62; color:white; padding:12px 16px; }
+header h1 { margin:0; font-size:1.2rem; display:inline-block; }
+.controls { padding:12px; background:#f7f9fc; display:flex; gap:12px; flex-wrap:wrap; }
+#quakeList { max-height:400px; overflow:auto; border:1px solid #ddd; padding:8px; background:white; margin-top:8px; }
+.quake { padding:6px; border-bottom:1px dashed #eee; cursor:pointer; }
+.quake:last-child { border-bottom:none; }
+.mag { font-weight:bold; margin-right:6px; padding:2px 6px; border-radius:4px; color:white; display:inline-block; min-width:30px; text-align:center;}
+#map { height:500px; width:100%; }
+footer { padding:8px; font-size:0.8rem; background:#f0f0f0; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>地震情報ダッシュボード</h1>
+</header>
+
+<div class="controls">
+  <label>
+    期間：
+    <select id="period">
+      <option value="hour">過去1時間</option>
+      <option value="day" selected>過去1日</option>
+      <option value="week">過去7日</option>
+      <option value="month">過去30日</option>
+    </select>
+  </label>
+  <label>
+    最小マグニチュード：
+    <select id="minmag">
+      <option value="0">0.0</option>
+      <option value="1">1.0</option>
+      <option value="2" selected>2.0</option>
+      <option value="3">3.0</option>
+      <option value="4">4.0</option>
+      <option value="5">5.0+</option>
+    </select>
+  </label>
+  <button id="refreshBtn">更新</button>
+</div>
+  <a>自動更新ではないので更新ボタンを押してください</a>
+
+<div id="map"></div>
+<div id="quakeList"></div>
+
+<footer>
+  データ提供：USGS Earthquake Hazards Program | 地図提供：OSM Japan
+  <br>※地震情報の正確性・最新性は保証されません。
+</footer>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// USGS GeoJSON URL
+const USGS_URLS = {
+  hour: 'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson',
+  day:  'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson',
+  week: 'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_week.geojson',
+  month:'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_month.geojson'
+};
+
+// マグニチュード色
+function magColor(m){
+  if(m>=6) return '#b71540';
+  if(m>=5) return '#e55039';
+  if(m>=4) return '#f6b93b';
+  if(m>=3) return '#f9ca24';
+  if(m>=2) return '#78e08f';
+  return '#60a3bc';
+}
+function makeMagSpan(m){
+  const span = document.createElement('span');
+  span.className='mag';
+  span.style.background=magColor(m);
+  span.textContent = m.toFixed(1);
+  return span;
+}
+function formatJST(epochMs){
+  const d = new Date(epochMs);
+  return d.toLocaleString('ja-JP', {timeZone:'Asia/Tokyo'});
+}
+
+// 簡易日本語化
+const placeMap = {
+  "Petropavlovsk-Kamchatsky": "ペトロパブロフスク・カムチャツキー",
+  "Russia": "ロシア",
+  "Japan": "日本",
+  "Kuril Islands": "千島列島",
+  "Alaska": "アラスカ",
+  "California": "カリフォルニア",
+};
+const dirMap = {
+  "N":"北","NE":"北東","ENE":"北東","E":"東","ESE":"東南東","SE":"南東","SSE":"南南東",
+  "S":"南","SSW":"南南西","SW":"南西","WSW":"西南西","W":"西","WNW":"西北西",
+  "NW":"北西","NNW":"北北西"
+};
+function translatePlace(place){
+  for(const key in placeMap){
+    place = place.replace(key, placeMap[key]);
+  }
+  place = place.replace(/(\d+)\s*km\s*([A-Z]+) of /, (m,p,dir)=>{
+    return (dirMap[dir]||dir) + " " + p + "km ";
+  });
+  return place;
+}
+
+// 地図初期化（日本語タイル）
+const map = L.map('map').setView([35.68, 139.76], 5);
+L.tileLayer('https://tile.openstreetmap.jp/{z}/{x}/{y}.png', {
+    attribution: '&copy; <a href="https://osm.jp/">OSM Japan</a>'
+}).addTo(map);
+let markersLayer = L.layerGroup().addTo(map);
+
+// 手動更新
+async function fetchAndRender(){
+  const periodSel=document.getElementById('period').value;
+  const minMag=parseFloat(document.getElementById('minmag').value);
+  const url=USGS_URLS[periodSel];
+  const listEl=document.getElementById('quakeList');
+  listEl.innerHTML='読み込み中…';
+  markersLayer.clearLayers();
+
+  try{
+    const res=await fetch(url);
+    const geojson=await res.json();
+    const features=geojson.features.sort((a,b)=>(b.properties.mag||0)-(a.properties.mag||0));
+    listEl.innerHTML='';
+    if(features.length===0){ listEl.innerHTML='条件に一致する地震はありません。'; return; }
+
+    for(const f of features){
+      const mag=f.properties.mag||0;
+      if(mag<minMag) continue;
+      const coords=f.geometry.coordinates;
+      if(!coords) continue;
+      const lon=coords[0], lat=coords[1], depth=coords[2];
+      const place=f.properties.place||'不明';
+      const jpPlace = translatePlace(place);
+      const time=f.properties.time;
+
+      // リスト
+      const item=document.createElement('div');
+      item.className='quake';
+      item.appendChild(makeMagSpan(mag));
+      item.innerHTML += `<span>${jpPlace} （${formatJST(time)}, 深さ:${depth}km）</span>`;
+      listEl.appendChild(item);
+
+      // マーカー
+      const marker = L.circleMarker([lat, lon], {
+        radius: 4 + mag*2,
+        fillColor: magColor(mag),
+        color: magColor(mag),
+        fillOpacity: 0.7
+      }).addTo(markersLayer);
+      marker.bindPopup(`${jpPlace}<br>マグニチュード: ${mag}<br>深さ: ${depth}km<br>${formatJST(time)}`);
+
+      item.addEventListener('click', () => { map.setView([lat, lon], 7); marker.openPopup(); });
+    }
+
+    if(listEl.innerHTML==='') listEl.innerHTML='条件に一致する地震はありません。';
+  }catch(e){ listEl.innerHTML='取得失敗: '+e; }
+}
+
+// ボタンのみで更新
+document.getElementById('refreshBtn').addEventListener('click', fetchAndRender);
+</script>
+
+</body>
+</html>
